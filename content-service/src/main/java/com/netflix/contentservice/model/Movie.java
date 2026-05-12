@@ -28,17 +28,19 @@ public class Movie {
     @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
+    @Column(nullable = false)
     private String title;
 
-    @Column(columnDefinition = "TEXT")
+    @Column(length = 1000)
     private String description;
+
 
     @Enumerated(EnumType.STRING)
     private Genre genre;
 
     private String director;
 
-    @Column(columnDefinition = "TEXT")
+
     private String cast;
 
     private int releaseYear;
@@ -58,6 +60,6 @@ public class Movie {
     @Enumerated(EnumType.STRING)
     private VideoStatus videoStatus;
 
-    @CreationTimestamp
+
     private LocalDateTime createdAt;
 }
