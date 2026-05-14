@@ -12,7 +12,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class MovieResponse {
 
-    @NotBlank(message = "Title is required")
+    @NotBlank(message = "Title is required here")
     private String title;
 
     private String description;
