@@ -17,7 +17,7 @@ public class MovieResponse {
 
     private String description;
 
-    @NotNull(message = "Genre is required")
+    @NotNull(message = "Genre required")
     private String genre;
 
     private String director;
