@@ -1,0 +1,292 @@
+================================================================================
+NETFLIX CLONE - PROJECT NOTES & FLOW DOCUMENTATION
+================================================================================
+Date: 2026-05-17
+Stack: Spring Boot 4.0.6, Java 17, MySQL, Kafka, Redis, AWS S3
+
+================================================================================
+SERVICES OVERVIEW
+================================================================================
+
+1. content-service   - Manages movie metadata (MySQL + JPA)
+2. video-service     - Handles raw video upload to S3, triggers encoding via Kafka
+3. encoding-service  - Consumes Kafka events, runs FFmpeg, produces HLS output to S3
+4. streaming-service - Serves HLS playlist/segments to the client (Redis + S3 + Kafka)
+
+================================================================================
+DOMAIN MODEL (content-service)
+================================================================================
+
+Movie Entity (movies table):
+  - id             : UUID (auto-generated)
+  - title          : String (NOT NULL)
+  - description    : String (max 1000 chars)
+  - genre          : Genre enum (see below)
+  - director       : String
+  - cast           : String
+  - releaseYear    : int
+  - rating         : double
+  - thumbnailUrl   : String
+  - durationMinutes: int
+  - videoKey       : String  <- S3 key for the raw video file
+  - hlsUrl         : String  <- S3 HLS playlist URL for streaming
+  - videoStatus    : VideoStatus enum (see below)
+  - createdAt      : LocalDateTime
+
+Genre enum:
+  ACTION, COMEDY, DRAMA, HORROR, THRILLER, ROMANCE, DOCUMENTARY, ANIMATION, SCI_FI
+
+VideoStatus enum (tracks video processing lifecycle):
+  PENDING   - movie record created but no video uploaded yet
+  UPLOADED  - raw video file successfully uploaded to S3
+  ENCODING  - FFmpeg is actively processing the video
+  ENCODED   - FFmpeg finished encoding
+  READY     - HLS playlist is generated and the movie can be streamed
+  FAILED    - encoding failed at some step
+
+================================================================================
+FLOW 1 - CONTENT CREATION FLOW
+================================================================================
+
+Goal: Admin adds a new movie's metadata (title, genre, cast, etc.)
+
+  [Client]
+     |
+     | POST /movies  (MovieRequest DTO)
+     v
+  [content-service :: contentController]
+     |
+     | validate request (spring-boot-starter-validation)
+     | save Movie entity with videoStatus = PENDING
+     v
+  [MySQL - movies table]
+     |
+     | return saved movie
+     v
+  [Client] <- MovieResponse DTO (id, title, description, genre, ...)
+
+Key files:
+  content-service/src/main/java/com/netflix/contentservice/controller/contentController.java
+  content-service/src/main/java/com/netflix/contentservice/dto/MovieRequest.java
+  content-service/src/main/java/com/netflix/contentservice/dto/MovieResponse.java
+  content-service/src/main/java/com/netflix/contentservice/model/Movie.java
+
+Status after flow: videoStatus = PENDING
+
+================================================================================
+FLOW 2 - VIDEO UPLOAD FLOW
+================================================================================
+
+Goal: Admin uploads the raw video file for an existing movie
+
+  [Client]
+     |
+     | POST /videos/{movieId}  (multipart video file)
+     v
+  [video-service]
+     |
+     | upload raw video to AWS S3
+     | S3 key stored as: videos/raw/{movieId}/filename.mp4
+     v
+  [AWS S3 - raw videos bucket]
+     |
+     | on success: publish Kafka event "video.uploaded"
+     | payload: { movieId, videoKey (S3 key) }
+     v
+  [Kafka topic: video.uploaded]
+     |
+     | also notify content-service to update status -> UPLOADED
+     v
+  [content-service] - updates Movie.videoStatus = UPLOADED, Movie.videoKey = S3 key
+
+Key files:
+  video-service/src/main/java/com/netflix/videoservice/VideoServiceApplication.java
+  video-service/pom.xml (AWS S3 SDK, Kafka)
+
+Status after flow: videoStatus = UPLOADED
+
+================================================================================
+FLOW 3 - VIDEO ENCODING FLOW
+================================================================================
+
+Goal: Convert raw video to HLS (HTTP Live Streaming) format using FFmpeg
+
+  [Kafka topic: video.uploaded]
+     |
+     | consumed by encoding-service
+     v
+  [encoding-service :: Kafka Consumer]
+     |
+     | update Movie.videoStatus = ENCODING (notify content-service)
+     | download raw video from S3 (videoKey)
+     v
+  [AWS S3 - raw videos bucket]
+     |
+     | run FFmpeg to produce HLS:
+     |   - generates .m3u8 playlist file
+     |   - generates .ts segment files (e.g., 10-second chunks)
+     | upload all HLS files to S3
+     | S3 key pattern: videos/hls/{movieId}/playlist.m3u8
+     v
+  [AWS S3 - HLS bucket]
+     |
+     | on success: publish Kafka event "video.encoded"
+     | payload: { movieId, hlsUrl }
+     |
+     | on failure: publish Kafka event "video.encoding.failed"
+     v
+  [Kafka topics: video.encoded | video.encoding.failed]
+
+Key files:
+  encoding-service/src/main/java/com/netflix/encodingservice/EncodingServiceApplication.java
+  encoding-service/pom.xml (Kafka, AWS S3 SDK)
+
+Status after flow: videoStatus = ENCODED (or FAILED)
+
+================================================================================
+FLOW 4 - CONTENT READY FLOW
+================================================================================
+
+Goal: Mark movie as streamable after successful encoding
+
+  [Kafka topic: video.encoded]
+     |
+     | consumed by content-service
+     v
+  [content-service :: Kafka Consumer]
+     |
+     | update Movie.hlsUrl = HLS playlist URL from S3
+     | update Movie.videoStatus = READY
+     v
+  [MySQL - movies table]
+
+  Movie is now fully available for streaming.
+
+  [Kafka topic: video.encoding.failed]
+     |
+     | consumed by content-service
+     v
+  [content-service]
+     | update Movie.videoStatus = FAILED
+
+Status after flow: videoStatus = READY (or FAILED)
+
+================================================================================
+FLOW 5 - STREAMING FLOW
+================================================================================
+
+Goal: User watches a movie
+
+  [Client / Video Player]
+     |
+     | GET /stream/{movieId}
+     v
+  [streaming-service]
+     |
+     | check Redis cache for hlsUrl (movieId as cache key)
+     |    cache HIT  -> return hlsUrl directly
+     |    cache MISS -> fetch movie from content-service (REST call)
+     |                  cache hlsUrl in Redis (TTL ~1hr)
+     v
+  [Redis cache]
+     |
+     | return HLS playlist URL
+     v
+  [Client / Video Player]
+     |
+     | GET {hlsUrl}  <- fetches .m3u8 from S3 (or CloudFront CDN)
+     v
+  [AWS S3 / CloudFront]
+     |
+     | streams .ts video segments to the player
+     v
+  [Client] - video plays!
+
+Key files:
+  streaming-service/src/main/java/com/netflix/streamingservice/StreamingServiceApplication.java
+  streaming-service/pom.xml (Kafka, Redis, AWS S3 SDK)
+
+================================================================================
+FULL END-TO-END FLOW SUMMARY
+================================================================================
+
+  [Admin] --> POST /movies
+                  |
+                  v
+             content-service saves Movie (PENDING)
+                  |
+  [Admin] --> POST /videos/{movieId}
+                  |
+                  v
+             video-service uploads to S3 (UPLOADED)
+                  |
+                  | Kafka: video.uploaded
+                  v
+             encoding-service downloads, runs FFmpeg, uploads HLS (ENCODING -> ENCODED)
+                  |
+                  | Kafka: video.encoded
+                  v
+             content-service updates hlsUrl + status (READY)
+                  |
+  [User]  --> GET /stream/{movieId}
+                  |
+                  v
+             streaming-service checks Redis -> returns hlsUrl
+                  |
+                  v
+             Video player fetches .m3u8 from S3/CDN -> streams .ts segments
+
+================================================================================
+KAFKA TOPICS (planned)
+================================================================================
+
+  video.uploaded          - published by video-service, consumed by encoding-service
+  video.encoded           - published by encoding-service, consumed by content-service
+  video.encoding.failed   - published by encoding-service, consumed by content-service
+
+================================================================================
+INFRASTRUCTURE DEPENDENCIES
+================================================================================
+
+  MySQL      - content-service (movie metadata persistence)
+  AWS S3     - video-service (raw upload), encoding-service (HLS output), streaming-service (segment delivery)
+  Kafka      - video-service, encoding-service, content-service (async event bus)
+  Redis      - streaming-service (HLS URL cache to reduce DB/content-service calls)
+  FFmpeg     - encoding-service (video transcoding, not a Spring dependency - system tool)
+
+================================================================================
+WHAT IS IMPLEMENTED VS TODO
+================================================================================
+
+IMPLEMENTED:
+  [x] Movie entity with full properties (id, title, genre, cast, hlsUrl, videoKey, etc.)
+        - @Entity, @Table("movies"), Lombok @Data/@Builder/@NoArgsConstructor/@AllArgsConstructor
+        - @GeneratedValue(UUID), @Column(nullable=false) on title, @Column(length=1000) on description
+        - @Enumerated(STRING) for genre and videoStatus
+        - NOTE: @CreationTimestamp imported but NOT applied to createdAt field (manual set or add annotation)
+  [x] VideoStatus enum - PENDING, UPLOADED, ENCODING, ENCODED, READY, FAILED
+  [x] Genre enum - ACTION, COMEDY, DRAMA, HORROR, THRILLER, ROMANCE, DOCUMENTARY, ANIMATION, SCI_FI
+  [x] MovieResponse DTO - fields: title, description, genre(String), director, cast, releaseYear, rating, thumbnailUrl, durationMinutes
+        - WARNING: has @NotBlank/@NotNull validation annotations (these belong on MovieRequest, not MovieResponse)
+        - MISSING: id, videoKey, hlsUrl, videoStatus, createdAt fields not yet in response
+  [x] All 4 Spring Boot applications bootstrapped
+  [x] Dependencies declared in all pom.xml files
+
+TODO:
+  [ ] Fix MovieResponse: remove validation annotations, add id + videoStatus + hlsUrl fields
+  [ ] Apply @CreationTimestamp to Movie.createdAt field
+  [ ] Fill in MovieRequest DTO fields (title, description, genre, director, cast, releaseYear, rating, thumbnailUrl, durationMinutes) with validation
+  [ ] Implement contentController endpoints (POST /movies, GET /movies, GET /movies/{id})
+  [ ] Add MovieRepository (JpaRepository<Movie, String>) in content-service
+  [ ] Add MovieService in content-service
+  [ ] Implement video upload endpoint in video-service
+  [ ] Implement S3 upload logic in video-service
+  [ ] Implement Kafka producer in video-service
+  [ ] Implement Kafka consumer + FFmpeg encoding logic in encoding-service
+  [ ] Implement Kafka consumer for video.encoded in content-service
+  [ ] Implement streaming endpoint in streaming-service
+  [ ] Implement Redis caching in streaming-service
+  [ ] Add application.yaml configs (DB, Kafka brokers, S3 bucket names, Redis host)
+  [ ] Error handling and retry logic for encoding failures
+
+================================================================================
