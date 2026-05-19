@@ -1,7 +1,7 @@
 ================================================================================
 NETFLIX CLONE - PROJECT NOTES & FLOW DOCUMENTATION
 ================================================================================
-Date: 2026-05-17
+Date: 2026-05-19
 Stack: Spring Boot 4.0.6, Java 17, MySQL, Kafka, Redis, AWS S3
 
 ================================================================================
@@ -266,6 +266,9 @@ IMPLEMENTED:
         - NOTE: @CreationTimestamp imported but NOT applied to createdAt field (manual set or add annotation)
   [x] VideoStatus enum - PENDING, UPLOADED, ENCODING, ENCODED, READY, FAILED
   [x] Genre enum - ACTION, COMEDY, DRAMA, HORROR, THRILLER, ROMANCE, DOCUMENTARY, ANIMATION, SCI_FI
+  [x] MovieRequest DTO - fields: title(@NotBlank), description, genre(@NotNull), director, cast, releaseYear, rating, thumbnailUrl, durationMinutes
+        - Lombok @Data/@NoArgsConstructor/@AllArgsConstructor
+        - Validation: @NotBlank on title, @NotNull on genre
   [x] MovieResponse DTO - fields: title, description, genre(String), director, cast, releaseYear, rating, thumbnailUrl, durationMinutes
         - WARNING: has @NotBlank/@NotNull validation annotations (these belong on MovieRequest, not MovieResponse)
         - MISSING: id, videoKey, hlsUrl, videoStatus, createdAt fields not yet in response
@@ -275,7 +278,6 @@ IMPLEMENTED:
 TODO:
   [ ] Fix MovieResponse: remove validation annotations, add id + videoStatus + hlsUrl fields
   [ ] Apply @CreationTimestamp to Movie.createdAt field
-  [ ] Fill in MovieRequest DTO fields (title, description, genre, director, cast, releaseYear, rating, thumbnailUrl, durationMinutes) with validation
   [ ] Implement contentController endpoints (POST /movies, GET /movies, GET /movies/{id})
   [ ] Add MovieRepository (JpaRepository<Movie, String>) in content-service
   [ ] Add MovieService in content-service
